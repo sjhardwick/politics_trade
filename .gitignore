@@ -1,0 +1,58 @@
+# ----------------------
+# 🗂️  Data Files
+# ----------------------
+data/
+*.csv
+*.tsv
+*.parquet
+*.xlsx
+*.zip
+*.json
+
+# ----------------------
+# 📓 Jupyter Notebooks
+# ----------------------
+.ipynb_checkpoints/
+
+# ----------------------
+# 🐍 Python Environments
+# ----------------------
+# Conda environment files
+*.conda
+*.env
+*.venv
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+
+# ----------------------
+# 📊 R Environments
+# ----------------------
+.Rhistory
+.RData
+.Rproj.user/
+renv/library/
+renv/staging/
+
+# ----------------------
+# 📄 LaTeX Build Files
+# ----------------------
+*.aux
+*.log
+*.out
+*.toc
+*.lof
+*.lot
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+*.bbl
+*.blg
+
+# ----------------------
+# 💾 System Files
+# ----------------------
+.DS_Store
+Thumbs.db
