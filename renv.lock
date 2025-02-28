@@ -294,31 +294,6 @@
       ],
       "Hash": "d954cb1c57e8d8b756165d7ba18aa55a"
     },
-    "comtradr": {
-      "Package": "comtradr",
-      "Version": "1.0.3",
-      "Source": "Repository",
-      "Repository": "CRAN",
-      "Requirements": [
-        "R",
-        "askpass",
-        "cachem",
-        "cli",
-        "fs",
-        "httr2",
-        "lifecycle",
-        "lubridate",
-        "memoise",
-        "poorman",
-        "purrr",
-        "rappdirs",
-        "readr",
-        "rlang",
-        "stringr",
-        "tools"
-      ],
-      "Hash": "a32d99ee32fec18b58a4ebe965f6ea9f"
-    },
     "conflicted": {
       "Package": "conflicted",
       "Version": "1.2.0",
@@ -331,6 +306,16 @@
         "rlang"
       ],
       "Hash": "bb097fccb22d156624fd07cd2894ddb6"
+    },
+    "countrycode": {
+      "Package": "countrycode",
+      "Version": "1.6.0",
+      "Source": "Repository",
+      "Repository": "CRAN",
+      "Requirements": [
+        "R"
+      ],
+      "Hash": "08b7058813f13c7a1bb294fea9045e3a"
     },
     "cpp11": {
       "Package": "cpp11",
@@ -802,27 +787,6 @@
       ],
       "Hash": "ac107251d9d9fd72f0ca8049988f1d7f"
     },
-    "httr2": {
-      "Package": "httr2",
-      "Version": "1.1.0",
-      "Source": "Repository",
-      "Repository": "CRAN",
-      "Requirements": [
-        "R",
-        "R6",
-        "cli",
-        "curl",
-        "glue",
-        "lifecycle",
-        "magrittr",
-        "openssl",
-        "rappdirs",
-        "rlang",
-        "vctrs",
-        "withr"
-      ],
-      "Hash": "0f14199bbd820a9fca398f2df40994f1"
-    },
     "ids": {
       "Package": "ids",
       "Version": "1.0.1",
@@ -1081,16 +1045,6 @@
         "utils"
       ],
       "Hash": "01f28d4278f15c76cddbea05899c5d6f"
-    },
-    "poorman": {
-      "Package": "poorman",
-      "Version": "0.2.7",
-      "Source": "Repository",
-      "Repository": "CRAN",
-      "Requirements": [
-        "R"
-      ],
-      "Hash": "d0bb8a425a213bc38f2cf8f14ded8941"
     },
     "prettyunits": {
       "Package": "prettyunits",
