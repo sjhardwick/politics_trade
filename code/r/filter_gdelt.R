@@ -1,158 +1,118 @@
 
-plan(multisession, workers = 2)  # use two cores (adjust if needed)
-
 # load packages
-library(arrow)      # for reading, writing parquet
-library(data.table) # for efficient data handling
-library(dlm)        # for kalman filter
-library(furrr)      # for parallel map
-library(future)     # for parallel backend
+library(arrow)       # for reading & writing parquet files
+library(dplyr)       # for general data manipulation
+library(furrr)       # for parallel processing
+library(data.table)  # for general data manipulation
+
+plan(multisession, workers = 2)  # use two cores
 
 # load data and convert to data.table
 gdelt <- read_parquet("data/processed/gdelt_tidy.parquet")
-gdelt_dt <- as.data.table(gdelt)
-remove(gdelt)
+setDT(gdelt)
 
-# define kalman filter function
-apply_kalman <- function(data) {
-  tryCatch({
-    # sort data by month_year
-    data <- data[order(month_year)]
-    
-    # define local level model builder
-    build_dlm <- function(parm) {
-      dlmModPoly(order = 1, dV = parm[1], dW = exp(parm[2]))
-    }
-    
-    # initial parameter guess
-    init_parm <- c(0, log(0.01))
-    
-    # build model and set time-varying observation variance
-    model <- build_dlm(init_parm)
-    model$V <- data$obs_variance # use obs_variance for each time point
-    
-    # apply kalman filter and smoother
-    filtered <- dlmFilter(data$gs_adj, model)
-    smoothed <- dlmSmooth(filtered)
-    
-    # add filtered index
-    data$filtered_index <- filtered$f
-    # drop the first element (extra initial state) and add smoothed index
-    data$smoothed_index <- drop(smoothed$s)[-1]
-    return(data)
-    
-  }, error = function(e) {
-    # on error, set smoothed_index to NA and return data
-    data$smoothed_index <- NA
-    return(data)
-  })
+# require 12+ months of non-zero observations
+gdelt <- gdelt[, .SD[sum(gs_adj != 0, na.rm = TRUE) >= 36], by = .(country_1, country_2)]
+
+# function to estimate Q (process variance) from AR(1) model
+estimate_Q <- function(data) {
+  model <- tryCatch({
+    arima(data$gs_adj, order = c(1, 0, 0), include.mean = TRUE)
+  }, error = function(e) return(NULL))
+  
+  if (is.null(model)) return(0.001)  # default fallback Q
+  
+  max(var(residuals(model), na.rm = TRUE), 1e-6)  # ensure Q is positive
 }
 
-# clean function to ensure output is a data.table without duplicate columns
-apply_kalman_clean <- function(data) {
-  # ensure data is a data.table
-  data <- as.data.table(data)
-  result <- apply_kalman(data)
-  # remove duplicate columns if any
-  result <- result[, unique(names(result)), with = FALSE]
-  return(result)
-}
-
-# define function to filter dataset based on observation thresholds
-# and apply kalman filter
-apply_filters_and_kalman <- function(non_zero_threshold, zero_streak_threshold) {
-  gdelt_dt_filtered <- gdelt_dt[, {
+# particle filter function
+bootstrap_particle_filter <- function(data, N_particles = 1000) {
+  
+  data <- data[order(month_year)]  # ensure data is ordered
+  
+  # estimate Q (process variance)
+  Q <- estimate_Q(data)
+  
+  # number of months/time steps in series
+  T <- nrow(data)
+  
+  # initialise particles and weights
+  particles <- matrix(0, nrow = T, ncol = N_particles)
+  weights <- matrix(1 / N_particles, nrow = T, ncol = N_particles)
+  
+  # initialise first set of particles using empirical data
+  particles[1, ] <- if (!is.na(data$gs_adj[1])) {
+    sample(data$gs_adj, N_particles, replace = TRUE)
+  } else {
+    rnorm(N_particles, mean = 0, sd = sqrt(Q))  # fallback: use mean zero
+  }
+  
+  # pre-compute R_t (observation variance)
+  # inversely proportional to the number of events recorded
+  data[, R_t := 1 / (num_events + 1)]  # add 1 to avoid division by zero
+  
+  # loop through each month
+  for (t in 2:T) {
     
-    # count non-zero observations
-    non_zero_count <- sum(gs_adj != 0, na.rm = TRUE)
+    # prediction step: propagate particles forward
+    particles[t, ] <- sample(particles[t - 1, ], N_particles, replace = TRUE) + 
+      rnorm(N_particles, mean = 0, sd = sqrt(Q))
     
-    # identify longest consecutive zero streak
-    zero_run_lengths <- rle(gs_adj == 0)
-    max_zero_streak <- if (any(zero_run_lengths$values)) {
-      max(zero_run_lengths$lengths[zero_run_lengths$values], na.rm = TRUE)
+    # compute weights based on observation probability
+    if (!is.na(data$gs_adj[t])) {
+      weights[t, ] <- dnorm(data$gs_adj[t], mean = particles[t, ], sd = sqrt(max(data$R_t[t], 1e-6)))
+      
+      # ensure the sum of weights is valid
+      sum_weights <- sum(weights[t, ], na.rm = TRUE)
+      if (is.na(sum_weights) || sum_weights == 0) {
+        # print warning if there is issue with weight vector
+        warning(sprintf("Zero or NA weights at t = %d for %s-%s", 
+                        t, data$country_1[1], data$country_2[1]))
+        weights[t, ] <- rep(1 / N_particles, N_particles)  # reset to uniform weights
+      } else {
+        weights[t, ] <- weights[t, ] / sum_weights  # normalise so weights sum to 1
+      }
     } else {
-      0
+      weights[t, ] <- 1 / N_particles  # assign uniform weights for missing observations
     }
     
-    # flag valid series
-    valid_series <- (non_zero_count >= non_zero_threshold) & 
-      (max_zero_streak <= zero_streak_threshold)
+    # resample particles
+    resample_indices <- sample(1:N_particles, N_particles, replace = TRUE, prob = weights[t, ])
+    particles[t, ] <- particles[t, resample_indices]
+    weights[t, ] <- 1 / N_particles  # reset particle weights
     
-    if (valid_series) {
-      obs_variance <- ifelse(num_events == 0, 1e6, 1 / num_events)
-      .(month_year, country_1, country_2, gs_adj, num_events, obs_variance)
-    } else {
-      NULL
-    }
-    
-  }, by = .(country_1, country_2)]
+  }
   
-  # split data by country pair
-  gdelt_split <- split(gdelt_dt_filtered, 
-                       list(gdelt_dt_filtered$country_1, gdelt_dt_filtered$country_2), 
-                       drop = TRUE)
+  # store results
+  data[, filtered_index := rowMeans(particles, na.rm = TRUE)]
   
-  # apply kalman filter in parallel
-  gdelt_list <- future_map(gdelt_split, apply_kalman_clean, .progress = TRUE)
-  
-  # bind results
-  gdelt_filtered <- rbindlist(gdelt_list, use.names = TRUE, fill = TRUE)
-  
-  # convert month_year to date format
-  gdelt_filtered[, month_year := as.IDate(paste0(substr(month_year, 1, 4), "-", 
-                                                 substr(month_year, 5, 6), "-01"))]
-  
-  return(gdelt_filtered)
+  return(data)
 }
 
-# define thresholds for three versions (one baseline, two robustness checks)
-thresholds <- list(
-  # larger sample: 20 per cent minimum non-zero obs, 18 months max zero streak
-  list(non_zero_threshold = 108, zero_streak_threshold = 18), 
-  # standard/baseline sample: 50 per cent, 12 months
-  list(non_zero_threshold = 270, zero_streak_threshold = 12),
-  # stricter/smaller sample: 90 per cent, 6 months
-  list(non_zero_threshold = 486, zero_streak_threshold = 6)
-)
+# apply the filter by country pair
+filtered_results <- gdelt[, bootstrap_particle_filter(.SD), by = .(country_1, country_2)]
 
-# run each version in parallel
-gdelt_versions <- future_map(thresholds, 
-                             ~ apply_filters_and_kalman(.x$non_zero_threshold, .x$zero_streak_threshold),
-                             .progress = TRUE)
+# count nonzero observations
+filtered_results[, nonzero_months := sum(gs_adj != 0, na.rm = TRUE), by = .(country_1, country_2)]
 
-# convert list to named objects for each version of data
-list2env(setNames(gdelt_versions, c("gdelt_larger", "gdelt_baseline", "gdelt_stricter")), envir = .GlobalEnv)
+# create gsaf_baseline, gsaf_large, gsaf_small based on observation thresholds
+filtered_results[, `:=`(
+  gsaf_baseline = ifelse(nonzero_months >= 270, filtered_index, NA_real_),
+  gsaf_large = ifelse(nonzero_months >= 108, filtered_index, NA_real_),
+  gsaf_small = ifelse(nonzero_months >= 432, filtered_index, NA_real_)
+)]
 
-# convert month_year to date format in original data
-gdelt_dt[, month_year := as.IDate(paste0(substr(month_year, 1, 4), "-", 
-                                         substr(month_year, 5, 6), "-01"))]
+# select and rename columns before saving
+filtered_results <- filtered_results[, .(
+  country_1, 
+  country_2, 
+  month_year, 
+  gsa = gs_adj, 
+  gsaf = filtered_index, 
+  gsaf_baseline, 
+  gsaf_small, 
+  gsaf_large
+)]
 
-# compile into one table
-# start with the main dataset
-gdelt <- gdelt_dt[, .(country_1, country_2, month_year, gs_adj)]
-setnames(gdelt, "gs_adj", "gsa")
-
-# merge baseline, larger and smaller samples
-gdelt <- merge(
-  gdelt,
-  gdelt_baseline[, .(country_1, country_2, month_year, gsaf = filtered_index)],
-  by = c("country_1", "country_2", "month_year"),
-  all.x = TRUE
-)
-
-gdelt <- merge(
-  gdelt,
-  gdelt_larger[, .(country_1, country_2, month_year, gsaf_large = filtered_index)],
-  by = c("country_1", "country_2", "month_year"),
-  all.x = TRUE
-)
-
-gdelt <- merge(
-  gdelt,
-  gdelt_stricter[, .(country_1, country_2, month_year, gsaf_small = filtered_index)],
-  by = c("country_1", "country_2", "month_year"),
-  all.x = TRUE
-)
-
-# save merged data
-write_parquet(gdelt, "data/processed/gdelt_filtered.parquet")
+# save results
+write_parquet(filtered_results, "data/processed/gdelt_filtered.parquet")

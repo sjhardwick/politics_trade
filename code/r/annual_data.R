@@ -28,6 +28,7 @@ ipd_o <- ipds %>% rename("iso_o" = iso, "ipe_o" = ipe)
 ipd_d <- ipds %>% rename("iso_d" = iso, "ipe_d" = ipe)
 
 remove(ipds_raw, ipds)
+gc()
 
 
 # trade agreements --------------------------------------------------------
@@ -44,19 +45,35 @@ ftas <- ftas_raw %>%
   distinct(iso_o, iso_d, year, .keep_all = TRUE)
 
 remove(ftas_raw)
+gc()
 
 
 # GDELT -------------------------------------------------------------------
 
 # import GDELT data and create annual index
 
-gdelt_raw <- read_parquet("data/processed/gdelt_filtered.parquet")
+# gdelt_full is gdelt data for all available countries, including those with
+# insufficient observations for filtering
+gdelt_full <- read_parquet("data/processed/gdelt_tidy.parquet")
+
+gdelt_full_tidy <- gdelt_full %>%
+  rename("gsa" = gs_adj) %>%
+  select(country_1, country_2, month_year, gsa)
+
+# gdelt_filter contains the filtered GDELT indexes
+gdelt_filter <- read_parquet("data/processed/gdelt_filtered.parquet") %>%
+  select(-gsa) # ignore this column; it's in gdelt_full_tidy
 
 # note country_1 is earlier in alphabet than country_2; pairs aren't duplicated
-gdelt_left <- gdelt_raw %>% 
-  mutate(year = year(month_year)) %>%
+gdelt_left <- gdelt_full_tidy %>% 
+  left_join(gdelt_filter, by = c("country_1", "country_2", "month_year")) %>%
+  mutate(year = floor(month_year / 100)) %>% # extract year from month_year
   group_by(country_1, country_2, year) %>%
-  summarise(gsf_adj = sum(filtered_index)) %>%
+  summarise(gsa = sum(gsa),
+            gsaf = sum(gsaf),
+            gsaf_baseline = sum(gsaf_baseline),
+            gsaf_large = sum(gsaf_large),
+            gsaf_small = sum(gsaf_small)) %>%
   rename("iso_o" = country_1, "iso_d" = country_2)
 
 gdelt_right <- gdelt_left %>% rename("iso_o" = iso_d, "iso_d" = iso_o)
@@ -64,7 +81,8 @@ gdelt_right <- gdelt_left %>% rename("iso_o" = iso_d, "iso_d" = iso_o)
 gdelt <- bind_rows(gdelt_left, gdelt_right) %>%
   distinct(iso_o, iso_d, year, .keep_all = TRUE)
 
-remove(gdelt_raw, gdelt_left, gdelt_right)
+remove(gdelt_left, gdelt_right, gdelt_filter, gdelt_full, gdelt_full_tidy)
+gc()
 
 
 # CEPII gravity data ------------------------------------------------------
@@ -122,6 +140,7 @@ gravity_full <- gravity_tv_updated %>%
 
 remove(gravity_raw, gravity_ti, gravity_tv, gravity_2021, gravity_2022_2024,
        gravity_tv_updated)
+gc()
 
 
 # international trade -----------------------------------------------------
@@ -146,6 +165,7 @@ imports <- imports_raw %>%
   drop_na()
 
 remove(imports_raw)
+gc()
 
 
 # estimate intra-national trade -------------------------------------------
@@ -195,6 +215,7 @@ intra <- gdp %>%
   filter(!(iso_o %in% c("SLE", "MMR")))
 
 remove(gdp_raw, gdp, er_raw, exports_raw, total_exports)
+gc()
 
 
 # V-Dem data --------------------------------------------------------------
@@ -244,6 +265,7 @@ vdem_d <- vdem_o %>%
     )
 
 remove(vdem_data)
+gc()
 
 
 # polity, WGI, QoG --------------------------------------------------------
@@ -309,16 +331,27 @@ cpi_d <- cpi_o %>%
   rename("iso_d"= iso_o, "ti_cpi_d" = ti_cpi_o)
 
 remove(polity_raw, wgi_raw, qog_raw)
+gc()
 
 
 # combine all data sources ------------------------------------------------
 
+# define inverse hyperbolic sine transformation function for indexes
+ihs_transform <- function(x) {
+  ifelse(is.na(x), NA, log(x + sqrt(x^2 + 1)))
+}
+
+# merge all data sets
 annual_data <- bind_rows(imports, intra) %>%
+  
+  # trade agreements, gravity variables, political distance measures
   left_join(ftas, by = c("iso_o", "iso_d", "year")) %>%
   left_join(gravity_full, by = c("iso_o", "iso_d", "year")) %>%
   left_join(gdelt, by = c("iso_o", "iso_d", "year")) %>%
   left_join(ipd_d, by = c("iso_d", "year")) %>%
   left_join(ipd_o, by = c("iso_o", "year")) %>%
+  
+  # non-trade-related institutional indexes
   left_join(vdem_d, by = c("iso_d", "year")) %>%
   left_join(vdem_o, by = c("iso_o", "year")) %>%
   left_join(polity_d, by = c("iso_d", "year")) %>%
@@ -327,9 +360,13 @@ annual_data <- bind_rows(imports, intra) %>%
   left_join(wgi_o, by = c("iso_o", "year")) %>%
   left_join(cpi_d, by = c("iso_d", "year")) %>%
   left_join(cpi_o, by = c("iso_o", "year")) %>%
+  
+  # revise/define additional variables
   mutate(
     rta = replace_na(rta, 0),
     ipd = abs(ipe_d - ipe_o),
+    
+    # create various IDs for panel structure and fixed effects
     iso_o = as.character(iso_o),
     iso_d = as.character(iso_d),
     year = as.integer(year),
@@ -339,49 +376,55 @@ annual_data <- bind_rows(imports, intra) %>%
     year_d = paste(iso_d, year, sep = "-"),
     border_year = if_else(border == 1, year, 0)
   ) %>%
-  # factors more memory-efficient for fixed effects
-  mutate(
-    pair = as.factor(pair),
-    year_o = as.factor(year_o),
-    year_d = as.factor(year_d)
-  ) %>%
+  
+  # revise political distance measures to prepare for regressions
   mutate(
     # ideal point distance (IPD) = border * IPD
     ipd = if_else(border == 1, ipd, 0),
-    # create goldstein-based index for regressions
-    # use inverse hyperbolic sine to log-transform while preserving order
-    ihs_gsf = case_when(border == 1 ~ log(-gsf_adj + sqrt((-gsf_adj)^2 + 1)),
-                        TRUE ~ 0),
-    gatt_one = if_else((gatt_o + gatt_d == 1) & (border == 1),
-                       1,
-                       0),
+    # log-transformed version for gravity models
+    log_ipd = if_else(border == 1, log(ipd), 0),
+    
+    # create goldstein-based indexes for regressions using IHS transformation
+    across(c(gsa, gsaf, gsaf_baseline, gsaf_large, gsaf_small), 
+           ~ case_when(border == 1 ~ ihs_transform(-.x), 
+                       border == 0 ~ 0),
+           .names = "ihs_{.col}")
+  ) %>%
+  
+  # create additional border-dependent WTO, GATT, EU variables
+  mutate(
+    gatt_one = as.integer((gatt_o + gatt_d == 1) & (border == 1)),
     gatt_both = gatt_o * gatt_d * border,
-    wto_one = if_else((wto_o + wto_d == 1) & (border == 1),
-                      1,
-                      0),
+    wto_one = as.integer((wto_o + wto_d == 1) & (border == 1)),
     wto_both = wto_o * wto_d * border,
-    gatt_wto_one = if_else((gatt_wto_o + gatt_wto_d == 1) & (border == 1),
-                      1,
-                      0),
+    gatt_wto_one = as.integer((gatt_wto_o + gatt_wto_d == 1) & (border == 1)),
     gatt_wto_both = gatt_wto_o * gatt_wto_d * border,
-    eu_one = if_else((eu_o + eu_d == 1) & (border == 1),
-                     1,
-                     0),
+    eu_one = as.integer((eu_o + eu_d == 1) & (border == 1)),
     eu_both = eu_o * eu_d * border
   ) %>%
-  # scale polity data to exceed zero
-  mutate(polity_o_scaled = (polity_o + 10) / 20,
-         polity_d_scaled = (polity_d + 10) / 20) %>%
-  # remove if missing both key independent variables
-  filter(!((is.na(ihs_gsf)) & (is.na(ipd)))) %>%
+  
+  # scale polity data to ensure positive values
+  mutate(polity_scaled_o = (polity_o + 10) / 20,
+         polity_scaled_d = (polity_d + 10) / 20) %>%
+  
+  # convert IDs to factors for memory-efficient fixed effects
+  mutate(across(c(pair, year_o, year_d), as.factor)) %>%
+  
+  # remove rows missing both key independent variables
+  filter(!(is.na(ihs_gsa) & is.na(ipd))) %>%
+  
+  # sort
   arrange(iso_o, iso_d, year)
 
 # check uniqueness
-annual_data %>%
+duplicate_rows <- annual_data %>%
   count(iso_o, iso_d, year) %>%
   filter(n > 1) %>%
   nrow()
 
-# save data
+if (duplicate_rows > 0) {
+  warning(paste("Warning:", duplicate_rows, "duplicate rows found!"))
+}
 
+# save data
 write_parquet(annual_data, "data/processed/annual_data.parquet")

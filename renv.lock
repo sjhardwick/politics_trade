@@ -478,20 +478,6 @@
       ],
       "Hash": "33698c4b3127fc9f506654607fb73676"
     },
-    "dlm": {
-      "Package": "dlm",
-      "Version": "1.1-6.1",
-      "Source": "Repository",
-      "Repository": "CRAN",
-      "Requirements": [
-        "grDevices",
-        "graphics",
-        "methods",
-        "stats",
-        "utils"
-      ],
-      "Hash": "9f673cbcf481e0f89883217d2a82ff7c"
-    },
     "dplyr": {
       "Package": "dplyr",
       "Version": "1.1.4",
