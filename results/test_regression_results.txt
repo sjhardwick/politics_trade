@@ -1,0 +1,42 @@
+
+=============================================
+MODEL 1 SUMMARY:
+=============================================
+Poisson estimation, Dep. Var.: trade_flow
+Observations: 97,298
+Fixed-effects: year_o: 1,588,  year_d: 1,462,  pair: 14,214,  border_year: 11
+Standard-errors: Clustered (pair) 
+                           Estimate Std. Error   z value   Pr(>|z|)    
+ihs_gsa                   -0.006580   0.023674 -0.277956 0.78104600    
+rta                        0.040448   0.047869  0.844974 0.39812549    
+gatt_wto_one               0.054760   0.072837  0.751813 0.45216331    
+I(ihs_gsa * rta)           0.028164   0.031489  0.894425 0.37109481    
+I(ihs_gsa * gatt_wto_one) -0.316991   0.085868 -3.691592 0.00022285 ***
+---
+Signif. codes:  0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1
+Log-Likelihood: -4.705e+11   Adj. Pseudo R2: 0.998877
+           BIC:  9.41e+11      Squared Cor.: 0.999989
+
+
+
+=============================================
+MODEL 2 SUMMARY:
+=============================================
+Poisson estimation, Dep. Var.: trade_flow
+Observations: 115,972
+Fixed-effects: year_o: 1,783,  year_d: 1,666,  pair: 15,391,  border_year: 11
+Standard-errors: Clustered (pair) 
+                             Estimate Std. Error   z value   Pr(>|z|)    
+ihs_gsaf                    -0.008856   0.072321 -0.122456 0.90253756    
+rta                          0.089394   0.047310  1.889537 0.05881991 .  
+gatt_wto_both               -0.323977   0.090320 -3.586977 0.00033453 ***
+gatt_wto_one                -0.146961   0.076175 -1.929270 0.05369735 .  
+I(ihs_gsaf * rta)           -0.070560   0.028926 -2.439359 0.01471333 *  
+I(ihs_gsaf * gatt_wto_both)  0.081587   0.073560  1.109128 0.26737506    
+I(ihs_gsaf * gatt_wto_one)   0.041626   0.073123  0.569259 0.56918014    
+---
+Signif. codes:  0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1
+Log-Likelihood: -6.609e+11   Adj. Pseudo R2: 0.99941 
+           BIC:  1.322e+12     Squared Cor.: 0.999975
+
+
