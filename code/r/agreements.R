@@ -100,4 +100,4 @@ fta_expanded <- fta_pairs_unique %>%
   filter(fta == 1) %>% 
   select(year_qtr, country_1, country_2, fta)
 
-write_parquet(fta_expanded, "data/processed/wto_fta_tidy.parquet")
+write_parquet(fta_expanded, "data/temp/wto_fta_tidy.parquet")

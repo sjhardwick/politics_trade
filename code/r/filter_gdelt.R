@@ -115,4 +115,4 @@ filtered_results <- filtered_results[, .(
 )]
 
 # save results
-write_parquet(filtered_results, "data/processed/gdelt_filtered.parquet")
+write_parquet(filtered_results, "data/temp/gdelt_filtered.parquet")

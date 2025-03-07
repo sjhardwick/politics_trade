@@ -6,6 +6,7 @@
 
 library(arrow)
 library(countrycode)
+library(data.table)
 library(readxl)
 library(tidyverse)
 library(vdemdata)
@@ -35,7 +36,7 @@ gc()
 
 # import and tidy trade agreement data
 
-ftas_raw <- read_parquet("data/processed/wto_fta_tidy.parquet")
+ftas_raw <- read_parquet("data/temp/wto_fta_tidy.parquet")
 
 ftas <- ftas_raw %>%
   rename("iso_o" = country_1, "iso_d" = country_2) %>%
@@ -54,14 +55,14 @@ gc()
 
 # gdelt_full is gdelt data for all available countries, including those with
 # insufficient observations for filtering
-gdelt_full <- read_parquet("data/processed/gdelt_tidy.parquet")
+gdelt_full <- read_parquet("data/temp/gdelt_tidy.parquet")
 
 gdelt_full_tidy <- gdelt_full %>%
   rename("gsa" = gs_adj) %>%
   select(country_1, country_2, month_year, gsa)
 
 # gdelt_filter contains the filtered GDELT indexes
-gdelt_filter <- read_parquet("data/processed/gdelt_filtered.parquet") %>%
+gdelt_filter <- read_parquet("data/temp/gdelt_filtered.parquet") %>%
   select(-gsa) # ignore this column; it's in gdelt_full_tidy
 
 # note country_1 is earlier in alphabet than country_2; pairs aren't duplicated
@@ -334,6 +335,51 @@ remove(polity_raw, wgi_raw, qog_raw)
 gc()
 
 
+# tradeprod data ----------------------------------------------------------
+
+# load in CEPII tradeprod data
+tradeprod_raw <- read_csv("data/raw/TPe_V202401.csv")
+
+tradeprod <- tradeprod_raw %>%
+  mutate("iso_o" = iso3_tp_o, "iso_d" = iso3_tp_d) %>%
+  select(iso_o, iso_d, year, trade_comb, trade_i, industry) %>%
+  # drop NA because zeroes are genuine zeroes
+  filter(!is.na(trade_comb))
+
+remove(tradeprod_raw)
+gc()
+
+
+# war data ----------------------------------------------------------------
+
+# load in data on wars originally from UCDP
+war_locs_raw <- read_csv("data/temp/war_locs.csv")
+war_pairs_raw <- read_csv("data/temp/war_pairs.csv")
+
+# list of countries where war is occurring by year
+war_locs_o <- war_locs_raw %>%
+  rename("iso_o" = iso_loc) %>%
+  mutate(war_loc_o = 1)
+
+war_locs_d <- war_locs_o %>%
+  rename("iso_d" = iso_o, "war_loc_d" = war_loc_o)
+
+# list of country pairs at war in given year
+war_pairs_a <- war_pairs_raw %>%
+  mutate(pair = paste(iso_a, iso_b, sep = "-"),
+         war_pair = 1) %>%
+  select(pair, year, war_pair)
+
+war_pairs_b <- war_pairs_raw %>%
+  mutate(pair = paste(iso_b, iso_a, sep = "-"),
+         war_pair = 1) %>%
+  select(pair, year, war_pair)
+
+war_pairs <- bind_rows(war_pairs_a, war_pairs_b)
+
+remove(war_locs_raw, war_pairs_raw, war_pairs_a, war_pairs_b)
+
+
 # combine all data sources ------------------------------------------------
 
 # define inverse hyperbolic sine transformation function for indexes
@@ -342,7 +388,9 @@ ihs_transform <- function(x) {
 }
 
 # merge all data sets
-annual_data <- bind_rows(imports, intra) %>%
+
+# first, construct dataset with IMF trade data
+annual_data_imf <- bind_rows(imports, intra) %>%
   
   # trade agreements, gravity variables, political distance measures
   left_join(ftas, by = c("iso_o", "iso_d", "year")) %>%
@@ -351,7 +399,7 @@ annual_data <- bind_rows(imports, intra) %>%
   left_join(ipd_d, by = c("iso_d", "year")) %>%
   left_join(ipd_o, by = c("iso_o", "year")) %>%
   
-  # non-trade-related institutional indexes
+  # non-trade-related institutional indexes; wars by country
   left_join(vdem_d, by = c("iso_d", "year")) %>%
   left_join(vdem_o, by = c("iso_o", "year")) %>%
   left_join(polity_d, by = c("iso_d", "year")) %>%
@@ -360,6 +408,8 @@ annual_data <- bind_rows(imports, intra) %>%
   left_join(wgi_o, by = c("iso_o", "year")) %>%
   left_join(cpi_d, by = c("iso_d", "year")) %>%
   left_join(cpi_o, by = c("iso_o", "year")) %>%
+  left_join(war_locs_d, by = c("iso_d", "year")) %>%
+  left_join(war_locs_o, by = c("iso_o", "year")) %>%
   
   # revise/define additional variables
   mutate(
@@ -375,6 +425,14 @@ annual_data <- bind_rows(imports, intra) %>%
     year_o = paste(iso_o, year, sep = "-"),
     year_d = paste(iso_d, year, sep = "-"),
     border_year = if_else(border == 1, year, 0)
+  ) %>%
+  
+  # add war pair indicator and replace NA with zero
+  left_join(war_pairs, by = c("year", "pair")) %>%
+  mutate(
+    war_pair = replace_na(war_pair, 0),
+    war_loc_o = replace_na(war_loc_o, 0),
+    war_loc_d = replace_na(war_loc_d, 0)
   ) %>%
   
   # revise political distance measures to prepare for regressions
@@ -403,9 +461,11 @@ annual_data <- bind_rows(imports, intra) %>%
     eu_both = eu_o * eu_d * border
   ) %>%
   
-  # scale polity data to ensure positive values
+  # scale polity data to ensure positive values and create democracy indicator
   mutate(polity_scaled_o = (polity_o + 10) / 20,
-         polity_scaled_d = (polity_d + 10) / 20) %>%
+         polity_scaled_d = (polity_d + 10) / 20,
+         polity_dem_o = as.integer(polity_o >= 6),
+         polity_dem_d = as.integer(polity_d >= 6)) %>%
   
   # convert IDs to factors for memory-efficient fixed effects
   mutate(across(c(pair, year_o, year_d), as.factor)) %>%
@@ -417,14 +477,111 @@ annual_data <- bind_rows(imports, intra) %>%
   arrange(iso_o, iso_d, year)
 
 # check uniqueness
-duplicate_rows <- annual_data %>%
+duplicate_rows <- annual_data_imf %>%
   count(iso_o, iso_d, year) %>%
   filter(n > 1) %>%
   nrow()
 
 if (duplicate_rows > 0) {
-  warning(paste("Warning:", duplicate_rows, "duplicate rows found!"))
+  warning(paste("Warning:", duplicate_rows, "duplicate rows in annual_data_imf!"))
 }
 
 # save data
-write_parquet(annual_data, "data/processed/annual_data.parquet")
+write_parquet(annual_data_imf, "data/processed/annual_data_imf.parquet")
+
+# second, construct dataset with CEPII tradeprod data
+
+# remove IMF dataset to save memory
+remove(annual_data_imf); gc()
+
+# use data.table to reduce memory usage
+setDT(tradeprod)
+setDT(ftas)
+setDT(gravity_full)
+setDT(gdelt)
+setDT(ipd_d)
+setDT(ipd_o)
+setDT(vdem_d)
+setDT(vdem_o)
+setDT(polity_d)
+setDT(polity_o)
+setDT(wgi_d)
+setDT(wgi_o)
+setDT(cpi_d)
+setDT(cpi_o)
+
+annual_data_tp <- tradeprod
+annual_data_tp <- merge(annual_data_tp, ftas, by = c("iso_o", "iso_d", "year"), all.x = TRUE)
+annual_data_tp <- merge(annual_data_tp, gravity_full, by = c("iso_o", "iso_d", "year"), all.x = TRUE)
+annual_data_tp <- merge(annual_data_tp, gdelt, by = c("iso_o", "iso_d", "year"), all.x = TRUE)
+annual_data_tp <- merge(annual_data_tp, ipd_d, by = c("iso_d", "year"), all.x = TRUE)
+annual_data_tp <- merge(annual_data_tp, ipd_o, by = c("iso_o", "year"), all.x = TRUE)
+annual_data_tp <- merge(annual_data_tp, vdem_d, by = c("iso_d", "year"), all.x = TRUE)
+annual_data_tp <- merge(annual_data_tp, vdem_o, by = c("iso_o", "year"), all.x = TRUE)
+annual_data_tp <- merge(annual_data_tp, polity_d, by = c("iso_d", "year"), all.x = TRUE)
+annual_data_tp <- merge(annual_data_tp, polity_o, by = c("iso_o", "year"), all.x = TRUE)
+annual_data_tp <- merge(annual_data_tp, wgi_d, by = c("iso_d", "year"), all.x = TRUE)
+annual_data_tp <- merge(annual_data_tp, wgi_o, by = c("iso_o", "year"), all.x = TRUE)
+annual_data_tp <- merge(annual_data_tp, cpi_d, by = c("iso_d", "year"), all.x = TRUE)
+annual_data_tp <- merge(annual_data_tp, cpi_o, by = c("iso_o", "year"), all.x = TRUE)
+annual_data_tp <- merge(annual_data_tp, war_locs_d, by = c("iso_d", "year"), all.x = TRUE)
+annual_data_tp <- merge(annual_data_tp, war_locs_o, by = c("iso_o", "year"), all.x = TRUE)
+
+# fix RTA and ideal point distance variables; add fixed effects variables
+annual_data_tp[, `:=`(
+  rta = fifelse(is.na(rta), 0, rta),
+  ipd = abs(ipe_d - ipe_o),
+  war_loc_o = fifelse(is.na(war_loc_o), 0, war_loc_o),
+  war_loc_d = fifelse(is.na(war_loc_d), 0, war_loc_d),
+  pair = paste(iso_o, iso_d, sep = "-"),
+  pair_industry = paste(iso_o, iso_d, industry, sep = "-"),
+  border = fifelse(iso_o != iso_d, 1, 0),
+  year_o_industry = paste(iso_o, year, industry, sep = "-"),
+  year_d_industry = paste(iso_d, year, industry, sep = "-"),
+  border_year = fifelse(iso_o != iso_d, year, 0)
+)]
+
+# add war pair data
+annual_data_tp <- merge(annual_data_tp, war_pairs, by = c("year", "pair"), all.x = TRUE)
+
+# define additional variables that are dependent on those above
+annual_data_tp[, `:=`(
+  # political distance measures
+  ipd = fifelse(border == 1, ipd, 0),
+  log_ipd = fifelse(border == 1, log(ipd), 0),
+  
+  # IHS transformations
+  ihs_gsa = fifelse(border == 1, log(-gsa + sqrt(gsa^2 + 1)), 0),
+  ihs_gsaf = fifelse(border == 1, log(-gsaf + sqrt(gsaf^2 + 1)), 0),
+  
+  # WTO, GATT, EU indicators
+  gatt_wto_one = as.integer((gatt_wto_o + gatt_wto_d == 1) & (border == 1)),
+  gatt_wto_both = gatt_wto_o * gatt_wto_d * border,
+  wto_one = as.integer((wto_o + wto_d == 1) & (border == 1)),
+  wto_both = wto_o * wto_d * border,
+  eu_one = as.integer((eu_o + eu_d == 1) & (border == 1)),
+  eu_both = eu_o * eu_d * border,
+  
+  # create other polity variables: scaled to be positive; dummy for democracy
+  polity_scaled_o = (polity_o + 10) / 20,
+  polity_scaled_d = (polity_d + 10) / 20,
+  polity_dem_o = as.integer(polity_o >= 6),
+  polity_dem_d = as.integer(polity_d >= 6),
+  
+  # fix war pair variable (NAs should all be zero)
+  war_pair = fifelse(is.na(war_pair), 0, war_pair)
+)]
+
+# check uniqueness
+duplicate_rows <- annual_data_tp %>%
+  count(iso_o, iso_d, year, industry) %>%
+  filter(n > 1) %>%
+  nrow()
+
+if (duplicate_rows > 0) {
+  warning(paste("Warning:", duplicate_rows, "duplicate rows in annual_data_tp!"))
+}
+
+# save data
+write_parquet(annual_data_tp, "data/processed/annual_data_tp.parquet")
+

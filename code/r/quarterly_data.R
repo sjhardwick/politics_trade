@@ -17,7 +17,7 @@ library(zoo)
 
 # import and tidy trade agreement data
 
-ftas_raw <- read_parquet("data/processed/wto_fta_tidy.parquet")
+ftas_raw <- read_parquet("data/temp/wto_fta_tidy.parquet")
 
 ftas <- ftas_raw %>%
   rename("iso_o" = country_1, "iso_d" = country_2) %>%
@@ -34,14 +34,14 @@ remove(ftas_raw)
 
 # gdelt_full is gdelt data for all available countries, including those with
 # insufficient observations for filtering
-gdelt_full <- read_parquet("data/processed/gdelt_tidy.parquet")
+gdelt_full <- read_parquet("data/temp/gdelt_tidy.parquet")
 
 gdelt_full_tidy <- gdelt_full %>%
   rename("gsa" = gs_adj) %>%
   select(country_1, country_2, month_year, gsa)
 
 # gdelt_filter contains the filtered GDELT indexes
-gdelt_filter <- read_parquet("data/processed/gdelt_filtered.parquet") %>%
+gdelt_filter <- read_parquet("data/temp/gdelt_filtered.parquet") %>%
   select(-gsa) # ignore this column; it's in gdelt_full_tidy
 
 # note country_1 is earlier in alphabet than country_2; pairs aren't duplicated
@@ -340,6 +340,45 @@ cpi_d <- cpi_o %>% rename("iso_d"= iso_o, "ti_cpi_d" = ti_cpi_o)
 remove(polity_raw, wgi_raw, qog_raw)
 
 
+# war data ----------------------------------------------------------------
+
+# load in data on wars originally from UCDP
+war_locs_raw <- read_csv("data/temp/war_locs.csv")
+war_pairs_raw <- read_csv("data/temp/war_pairs.csv")
+
+# list of countries where war is occurring by year
+war_locs_o <- war_locs_raw %>%
+  rename("iso_o" = iso_loc) %>%
+  mutate(war_loc_o = 1) %>%
+  # replicate each row four times (one for each quarter)
+  crossing(qtr = 1:4) %>%
+  # create a zoo::yearqtr column
+  mutate(year_qtr = as.yearqtr(sprintf("%d-Q%d", year, qtr), format = "%Y-Q%q")) %>%
+  select(-c(year, qtr))
+
+war_locs_d <- war_locs_o %>%
+  rename("iso_d" = iso_o, "war_loc_d" = war_loc_o)
+
+# list of country pairs at war in given year
+war_pairs_a <- war_pairs_raw %>%
+  mutate(pair = paste(iso_a, iso_b, sep = "-"),
+         war_pair = 1) %>%
+  crossing(qtr = 1:4) %>%
+  mutate(year_qtr = as.yearqtr(sprintf("%d-Q%d", year, qtr), format = "%Y-Q%q")) %>%
+  select(pair, year_qtr, war_pair)
+
+war_pairs_b <- war_pairs_raw %>%
+  mutate(pair = paste(iso_b, iso_a, sep = "-"),
+         war_pair = 1) %>%
+  crossing(qtr = 1:4) %>%
+  mutate(year_qtr = as.yearqtr(sprintf("%d-Q%d", year, qtr), format = "%Y-Q%q")) %>%
+  select(pair, year_qtr, war_pair)
+
+war_pairs <- bind_rows(war_pairs_a, war_pairs_b)
+
+remove(war_locs_raw, war_pairs_raw, war_pairs_a, war_pairs_b)
+
+
 # combine all data sources ------------------------------------------------
 
 # define inverse hyperbolic sine transformation function for indexes
@@ -355,7 +394,7 @@ quarterly_data <- bind_rows(imports, intra) %>%
   left_join(gravity_quarterly, by = c("iso_o", "iso_d", "year_qtr")) %>%
   left_join(gdelt, by = c("iso_o", "iso_d", "year_qtr")) %>%
   
-  # non-trade-related institutional indexes
+  # non-trade-related institutional indexes; wars by country
   left_join(vdem_d, by = c("iso_d", "year_qtr")) %>%
   left_join(vdem_o, by = c("iso_o", "year_qtr")) %>%
   left_join(polity_d, by = c("iso_d", "year_qtr")) %>%
@@ -364,6 +403,8 @@ quarterly_data <- bind_rows(imports, intra) %>%
   left_join(wgi_o, by = c("iso_o", "year_qtr")) %>%
   left_join(cpi_d, by = c("iso_d", "year_qtr")) %>%
   left_join(cpi_o, by = c("iso_o", "year_qtr")) %>%
+  left_join(war_locs_d, by = c("iso_d", "year_qtr")) %>%
+  left_join(war_locs_o, by = c("iso_o", "year_qtr")) %>%
   
   # revise/define additional variables
   mutate(
@@ -376,9 +417,19 @@ quarterly_data <- bind_rows(imports, intra) %>%
     border = as.integer(iso_o != iso_d),
     year_qtr_o = paste(iso_o, year_qtr, sep = "-"),
     year_qtr_d = paste(iso_d, year_qtr, sep = "-"),
-    border_year_qtr = if_else(border == 1, as.character(year_qtr), "0"),
-    
-    # create additional border-dependent WTO, GATT, EU variables
+    border_year_qtr = if_else(border == 1, as.character(year_qtr), "0")
+  ) %>%
+  
+  # add war pair indicator and replace NA with zero
+  left_join(war_pairs, by = c("year_qtr", "pair")) %>%
+  mutate(
+    war_pair = replace_na(war_pair, 0),
+    war_loc_o = replace_na(war_loc_o, 0),
+    war_loc_d = replace_na(war_loc_d, 0)
+  ) %>%
+  
+  # create additional border-dependent WTO, GATT, EU variables
+  mutate(
     gatt_one = as.integer((gatt_o + gatt_d == 1) & (border == 1)),
     gatt_both = gatt_o * gatt_d * border,
     wto_one = as.integer((wto_o + wto_d == 1) & (border == 1)),
@@ -387,21 +438,21 @@ quarterly_data <- bind_rows(imports, intra) %>%
     gatt_wto_both = gatt_wto_o * gatt_wto_d * border,
     eu_one = as.integer((eu_o + eu_d == 1) & (border == 1)),
     eu_both = eu_o * eu_d * border
-    
   ) %>%
   
-  # revise political distance measures to prepare for regressions
+  # create goldstein-based indexes for regressions using IHS transformation
   mutate(
-    # create goldstein-based indexes for regressions using IHS transformation
     across(c(gsa, gsaf, gsaf_baseline, gsaf_large, gsaf_small), 
            ~ case_when(border == 1 ~ ihs_transform(-.x), 
                        border == 0 ~ 0),
            .names = "ihs_{.col}")
   ) %>%
-
-  # scale polity data to ensure positive values
+  
+  # scale polity data to ensure positive values and create democracy indicator
   mutate(polity_scaled_o = (polity_o + 10) / 20,
-         polity_scaled_d = (polity_d + 10) / 20) %>%
+         polity_scaled_d = (polity_d + 10) / 20,
+         polity_dem_o = as.integer(polity_o >= 6),
+         polity_dem_d = as.integer(polity_d >= 6)) %>%
   
   # remove rows missing key independent variable (goldstein-based index)
   filter(!is.na(ihs_gsa)) %>%

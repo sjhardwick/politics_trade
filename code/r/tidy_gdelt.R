@@ -57,4 +57,4 @@ gdelt_full <- full_grid %>%
   arrange(month_year, country_1, country_2)
 
 # save tidied data
-write_parquet(gdelt_full, "data/processed/gdelt_tidy.parquet")
+write_parquet(gdelt_full, "data/temp/gdelt_tidy.parquet")
